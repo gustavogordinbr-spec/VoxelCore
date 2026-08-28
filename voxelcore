@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+export HOST_UID="$(id -u)"
+export HOST_GID="$(id -g)"
+
+compose=(docker compose)
+
+die() {
+  printf 'VoxelCore: %s\n' "$*" >&2
+  exit 1
+}
+
+value_from_env() {
+  local key="$1"
+  [[ -f .env ]] || return 0
+  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' .env
+}
+
+require_tools() {
+  command -v docker >/dev/null 2>&1 || die "Docker nao foi encontrado."
+  docker compose version >/dev/null 2>&1 || die "Docker Compose v2 nao foi encontrado."
+}
+
+require_config() {
+  [[ -f .env ]] || die "Execute ./voxelcore init e edite o arquivo .env."
+}
+
+require_eula() {
+  require_config
+  local accepted
+  accepted="$(value_from_env EULA | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+  [[ "$accepted" == "TRUE" ]] || die \
+    "Leia https://www.minecraft.net/eula e defina EULA=TRUE no .env se concordar."
+}
+
+do_init() {
+  require_tools
+  if [[ -f .env ]]; then
+    printf 'VoxelCore: .env ja existe; nenhuma configuracao foi sobrescrita.\n'
+  else
+    install -m 600 .env.example .env
+    printf 'VoxelCore: .env criado. Edite EULA, gamertags e demais opcoes.\n'
+  fi
+}
+
+do_start() {
+  require_tools
+  require_eula
+  "${compose[@]}" up -d bedrock
+  printf 'VoxelCore: servidor iniciado. Use ./voxelcore logs para acompanhar.\n'
+}
+
+do_start_tunnel() {
+  require_tools
+  require_eula
+  local secret
+  secret="$(value_from_env PLAYIT_SECRET | tr -d '[:space:]')"
+  [[ -n "$secret" ]] || die "Preencha PLAYIT_SECRET no .env antes de iniciar o tunel."
+  "${compose[@]}" --profile tunnel up -d
+  printf 'VoxelCore: servidor e tunel iniciados. Veja o endereco no painel da Playit.\n'
+}
+
+do_install_addon() {
+  require_tools
+  require_config
+  [[ $# -eq 1 ]] || die "Uso: ./voxelcore install-addon ARQUIVO.mcaddon"
+  local source="$1"
+  [[ -f "$source" ]] || die "Arquivo nao encontrado: $source"
+  case "${source,,}" in
+    *.mcaddon|*.mcpack|*.zip) ;;
+    *) die "Formato aceito: .mcaddon, .mcpack ou .zip" ;;
+  esac
+  local destination="addons/$(basename -- "$source")"
+  [[ ! -e "$destination" ]] || die \
+    "Ja existe um add-on com esse nome em $destination. Renomeie o novo arquivo."
+  cp -- "$source" "$destination"
+  if ! "${compose[@]}" run --rm addon-init; then
+    rm -f -- "$destination"
+    die "O add-on foi rejeitado e a copia incompleta foi removida."
+  fi
+  if [[ -n "$("${compose[@]}" ps --status running -q bedrock)" ]]; then
+    "${compose[@]}" restart bedrock
+  fi
+  printf 'VoxelCore: add-on instalado e ativado no mundo configurado.\n'
+}
+
+do_backup() {
+  require_tools
+  require_config
+  local was_running=0
+  if [[ -n "$("${compose[@]}" ps --status running -q bedrock)" ]]; then
+    was_running=1
+    "${compose[@]}" stop bedrock
+  fi
+
+  mkdir -p backups
+  local archive="backups/voxelcore-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+  local result=0
+  tar -C "$ROOT_DIR" -czf "$archive" data || result=$?
+
+  if [[ "$was_running" -eq 1 ]]; then
+    "${compose[@]}" up -d bedrock
+  fi
+  [[ "$result" -eq 0 ]] || die "Falha ao criar backup."
+  printf 'VoxelCore: backup criado em %s\n' "$archive"
+}
+
+do_doctor() {
+  local failed=0
+  if command -v docker >/dev/null 2>&1; then
+    printf 'OK  Docker encontrado\n'
+  else
+    printf 'ERRO Docker nao encontrado\n'
+    failed=1
+  fi
+  if docker compose version >/dev/null 2>&1; then
+    printf 'OK  Docker Compose v2 encontrado\n'
+  else
+    printf 'ERRO Docker Compose v2 nao encontrado\n'
+    failed=1
+  fi
+  if [[ -f .env ]]; then
+    printf 'OK  Configuracao .env encontrada\n'
+  else
+    printf 'INFO Execute ./voxelcore init para criar a configuracao\n'
+  fi
+  return "$failed"
+}
+
+show_help() {
+  cat <<'HELP'
+VoxelCore - servidor Minecraft Bedrock com add-ons
+
+Comandos:
+  ./voxelcore init                       cria o arquivo .env
+  ./voxelcore start                      inicia usando a porta UDP do host/VPS
+  ./voxelcore start-tunnel               inicia com tunel Playit
+  ./voxelcore install-addon ARQUIVO      instala .mcaddon, .mcpack ou .zip
+  ./voxelcore logs                       acompanha os logs do Bedrock
+  ./voxelcore tunnel-logs                acompanha os logs do Playit
+  ./voxelcore status                     mostra os containers
+  ./voxelcore command COMANDO            envia um comando ao console Bedrock
+  ./voxelcore backup                     cria um backup consistente
+  ./voxelcore update                     atualiza imagens e reinicia
+  ./voxelcore restart                    reinicia o Bedrock
+  ./voxelcore stop                       encerra os containers
+  ./voxelcore doctor                     verifica os requisitos locais
+HELP
+}
+
+command_name="${1:-help}"
+shift || true
+
+case "$command_name" in
+  init) do_init "$@" ;;
+  start) do_start "$@" ;;
+  start-tunnel) do_start_tunnel "$@" ;;
+  install-addon) do_install_addon "$@" ;;
+  logs) require_tools; "${compose[@]}" logs -f bedrock ;;
+  tunnel-logs) require_tools; "${compose[@]}" --profile tunnel logs -f tunnel ;;
+  status) require_tools; "${compose[@]}" --profile tunnel ps ;;
+  command)
+    require_tools
+    [[ $# -gt 0 ]] || die "Informe o comando do servidor."
+    "${compose[@]}" exec -T bedrock send-command "$*"
+    ;;
+  backup) do_backup "$@" ;;
+  update)
+    require_tools
+    require_eula
+    "${compose[@]}" --profile tunnel pull
+    "${compose[@]}" up -d bedrock
+    ;;
+  restart) require_tools; require_eula; "${compose[@]}" restart bedrock ;;
+  stop) require_tools; "${compose[@]}" --profile tunnel down ;;
+  doctor) do_doctor "$@" ;;
+  help|-h|--help) show_help ;;
+  *) show_help; die "comando desconhecido: $command_name" ;;
+esac

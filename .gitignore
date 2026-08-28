@@ -1,0 +1,21 @@
+.env
+
+# Mundo, binários oficiais e configurações geradas pelo servidor
+data/*
+!data/.gitkeep
+
+# Add-ons podem ter licença própria e arquivos grandes
+addons/*
+!addons/.gitkeep
+!addons/README.md
+
+# Backups locais
+backups/*
+!backups/.gitkeep
+
+# Python e ferramentas
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+

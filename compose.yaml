@@ -1,0 +1,77 @@
+name: voxelcore
+
+services:
+  addon-init:
+    image: python:3.12-alpine
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      MAX_ADDON_FILES: "${MAX_ADDON_FILES:-20000}"
+      MAX_ADDON_UNPACKED_MB: "${MAX_ADDON_UNPACKED_MB:-1024}"
+    command:
+      - python
+      - /opt/voxelcore/addon_installer.py
+      - --addons
+      - /addons
+      - --data
+      - /data
+      - --world
+      - "${LEVEL_NAME:-VoxelCore}"
+    volumes:
+      - ./addons:/addons:ro
+      - ./data:/data
+      - ./scripts/addon_installer.py:/opt/voxelcore/addon_installer.py:ro
+    restart: "no"
+
+  bedrock:
+    image: itzg/minecraft-bedrock-server:stable
+    depends_on:
+      addon-init:
+        condition: service_completed_successfully
+    environment:
+      EULA: "${EULA:-FALSE}"
+      UID: "${HOST_UID:-1000}"
+      GID: "${HOST_GID:-1000}"
+      TZ: "${TIMEZONE:-America/Sao_Paulo}"
+      VERSION: "${SERVER_VERSION:-LATEST}"
+      SERVER_NAME: "${SERVER_NAME:-VoxelCore}"
+      LEVEL_NAME: "${LEVEL_NAME:-VoxelCore}"
+      GAMEMODE: "${GAMEMODE:-survival}"
+      DIFFICULTY: "${DIFFICULTY:-normal}"
+      MAX_PLAYERS: "${MAX_PLAYERS:-10}"
+      ALLOW_CHEATS: "${ALLOW_CHEATS:-false}"
+      VIEW_DISTANCE: "${VIEW_DISTANCE:-16}"
+      TICK_DISTANCE: "${TICK_DISTANCE:-4}"
+      ONLINE_MODE: "true"
+      ALLOW_LIST: "${ALLOW_LIST:-true}"
+      ALLOW_LIST_USERS: "${ALLOW_LIST_USERS:-}"
+      OPS: "${OPS:-}"
+      DEFAULT_PLAYER_PERMISSION_LEVEL: member
+      TEXTUREPACK_REQUIRED: "${TEXTUREPACK_REQUIRED:-true}"
+      CONTENT_LOG_FILE_ENABLED: "true"
+      CONTENT_LOG_LEVEL: warning
+      CONTENT_LOG_CONSOLE_OUTPUT_ENABLED: "true"
+      ENABLE_BDS_V6BIND_FIX: "true"
+      SERVER_PORT: "19132"
+      SERVER_PORT_V6: "19132"
+      STOP_SERVER_ANNOUNCE_DELAY: "10"
+      STOP_SERVER_ANNOUNCE: "say O servidor sera reiniciado em %delay% segundos."
+    ports:
+      - "${SERVER_PORT:-19132}:19132/udp"
+    volumes:
+      - ./data:/data
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+  tunnel:
+    image: ghcr.io/playit-cloud/playit-agent:latest
+    profiles: ["tunnel"]
+    network_mode: host
+    depends_on:
+      bedrock:
+        condition: service_started
+    environment:
+      SECRET_KEY: "${PLAYIT_SECRET:-}"
+    restart: unless-stopped
+
